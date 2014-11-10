@@ -9,6 +9,17 @@
   preset
   custom-extensions)
 
+(defun bytes-to-integer (bytes)
+  (reduce #'(lambda (a b) (+ (ash a 8) b)) bytes))
+
+(defun integer-to-bytes (integer)
+  (if (zerop integer)
+      '(0)
+      (reverse
+        (loop for index from 0 by 8
+              while (> (ash integer (- index)) 0)
+              collect (ldb (byte 8 index) integer)))))
+ 
 (defun col-extensions (col)
   (case (col-preset col)
     (:IMG (list ".jpg" ".jpeg" ".png" ".ico" ".bmp" ".xpm" ".gif"))
@@ -29,11 +40,12 @@
                                  collect node))))
     (if dir
         result
-        (sort result #'> :key #'file-date))))
+        (sort (remove nil result) #'> :key #'file-date))))
         
 (defun update-master-index (col)
   (let ((all-files (list-all-files col)))
-    (loop with file = (pop all-files)
+    (loop for file = (pop all-files)
+          while all-files
           do (file-id col file))))
 
 (defun rebuild-indexes (col)
@@ -63,21 +75,21 @@
             -1}))
 
 (defun bgulp (file)
-  (gulp file :binary t))
+  (bytes-to-integer (gulp file :binary t)))
 
-(defun bungulp (file data)
-  (ungulp file data :binary t))
+(defun bungulp (file int)
+  (ungulp file (integer-to-bytes int) :binary t :if-exists :supersede))
 
-(defmacro with-open-bitfile (params &body body)
-   `(with-open-file (,@params :element-type 'bit) ,@body))
+(defmacro with-open-binfile (params &body body)
+   `(with-open-file (,@params :element-type '(unsigned-byte 8)) ,@body))
 
 (defun col-data-dir (col)
   (str (col-root-dir col)
        "/.tagger/"
        (col-name col)))
-
+ 
 (defun col-tag-file (col tag)
-  (str (col-data-dir col) "/tags/" tag) "")
+  (str (col-data-dir col) "/tags/" tag))
 
 (defun tag-exists (col tag)
   (probe-file (col-tag-file col tag)))
@@ -86,36 +98,41 @@
   (unless (tag-exists col tag)
     (error "Unknown tag")))
 
-(defun make-tag (col tag)
-  (with-open-file (f (col-tag-file col tag) :direction :output)
-    (write-sequence nil f)))
+(defun write-bit (value file position)
+  "Writes bit with value <value> at <position> in <file>. Since unwritten bits are read as zeros, if position is more than file length, we don't need to write the bit"
+  (let* ((file-size (if (probe-file file) (filesize file) 0)))
+    (when (and (= value 0)
+               (< file-size (ceiling position 8)))
+      (return-from write-bit nil))
+    (with-open-binfile (f file :direction :io
+                               :if-exists :overwrite
+                               :if-does-not-exist :create)
+       (when (< file-size
+                (ceiling position 8))
+         (write-sequence (make-array (ceiling (- position file-size) 8)
+                                     :element-type '(unsigned-byte 8)
+                                     :initial-element 0)
+                          f))
+       (file-position f (floor position 8))
+       (let ((current-byte (read-byte f))
+             (byte-index (mod position 8)))
+         (when (xor (logbitp byte-index current-byte)
+                    (= value 1))
+             (file-position f (floor position 8))
+             (write-byte (dpb value (byte 1 byte-index) current-byte) f))))))
 
 (defun tag (col file tag)
   "Add <tag> to <file> in col <col>"
-  (unless (tag-exists col tag)
-    (make-tag col tag))
   (let* ((fid (file-id col file))
-         (tag-file (col-tag-file col tag))
-         (tag-file-size (if (probe-file tag-file) (filesize tag-file) 0)))
-    (with-open-bitfile (f tag-file :if-exists :overwrite)
-        (when (< tag-file-size
-                 fid)
-          (write-sequence (make-array (- fid tag-file-size) :element-type 'bit :initial-element 0)
-                          f))
-        (file-position f fid)
-        (write-byte 1 f))))
+         (tag-file (col-tag-file col tag)))
+    (write-bit 1 tag-file fid)))
 
 (defun untag (col file tag)
   "Remove <tag> for <file>"
   (assert-tag-exists col tag)
   (let* ((fid (file-id col file))
-         (tag-file (col-tag-file col tag))
-         (tag-file-size (if (probe-file tag-file) (filesize tag-file) 0)))
-        (when (>= tag-file-size
-                  fid)
-          (with-open-bitfile (f tag-file :direction :output :if-exists :overwrite)
-            (file-position f fid)
-            (write-byte 0 f)))))
+         (tag-file (col-tag-file col tag)))
+    (write-bit 0 tag-file fid)))
 
 (defun file-id-file (col file)
     (str (col-data-dir col) "/fileids/" (~s "/\\//%%/g" file)))
@@ -123,7 +140,7 @@
 (defun file-id (col file)
   (awith (file-id-file col file)
     (if (probe-file it)
-        (gulp it :binary t)
+        (bgulp it)
         (make-file-id col file))))
 
 (defun make-file-id (col file)
@@ -143,11 +160,27 @@
          (bgulp maxfile)
          0)))
 
+(defun byte-to-bits (byte)
+  (awith (make-array 8 :element-type 'bit)
+    (loop for i from 0 to 7
+       do (setf (elt it i)
+                (if (logbitp i byte) 1 0)))
+    it))
+
+(defmacro read-bitseq (seq stream &key end)
+  `(let ((tempseq (make-array (ceiling (/ (array-total-size seq) 8))
+                              :element-type '(unsigned-byte 8)
+                              :initial-element 0)))
+     (read-sequence tempseq ,stream :end (ceiling (/ 8 ,end)))
+     (loop for i from 0 below ,end
+           do (setf (subseq ,seq (* i 8) (+ (* i 8) 1))
+                    (byte-to-bits (elt tempseq i))))))
+
 (defmacro with-tagfile-seq ((seq col tag maxid offset limit) &body body)
    `(let ((,seq (make-array ,maxid :element-type 'bit :initial-element 0)))
-      (with-open-bitfile (f (col-tag-file ,col ,tag))
-        (awhen ,offset (file-position f it))
-        (read-sequence ,seq f :end ,limit)
+      (with-open-binfile (f (col-tag-file ,col ,tag))
+        (awhen ,offset (file-position f (/ it 8)))
+        (read-bitseq ,seq f :end ,limit)
         ,@body)))
 
 (defun list-files (col &key +tags -tags (offset 0) limit)

@@ -32,5 +32,6 @@
   :depends-on (:zpb-exif
 	       :anaphora
 	       :clutch
+	       :odd-streams
 	       )
   )
