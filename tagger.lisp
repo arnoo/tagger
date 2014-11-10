@@ -183,6 +183,15 @@
         (read-bitseq ,seq f :end ,limit)
         ,@body)))
 
+(defmacro with-tag-and-subtags-seq ((seq col tag maxid offset limit) &body body)
+  `(with-tagfile-seq (,seq ,col ,tag ,maxid ,offset ,limit)
+     (loop for subtag in (subtags tag) 
+           do (with-tagfile-seq (subseq ,col ,tag ,maxid ,offset ,limit)
+                 (bit-or subseq ,seq)))))
+
+(defun subtags (col tag)
+  (mapcar [str (pathname-name _)] (directory (str (col-tag-file col tag) "%%*"))))
+
 (defun list-files (col &key +tags -tags (offset 0) limit)
   "List files in <col> matching <+tags> and not <-tags>"
   (let* ((maxid (max (col-max-id col) (if limit (+ offset limit) 0)))
@@ -191,7 +200,7 @@
                                 (- maxid offset))
                             :element-type 'bit)))
     (loop for tag in +tags
-          do (with-tagfile-seq (seq col tag maxid offset limit)
+          do (with-tag-and-subtags-seq (seq col tag maxid offset limit)
                (bit-and okids seq)))
     (loop for tag in -tags
           do (with-tagfile-seq (seq col tag maxid offset limit)
