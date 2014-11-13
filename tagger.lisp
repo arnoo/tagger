@@ -54,7 +54,8 @@
 (defun file-date (file)
   (let ((fdate (file-write-date file)))
     (if (in (list ".jpg" ".jpeg") (extension file))
-        (handler-bind ((ZPB-EXIF:INVALID-EXIF-STREAM [return-from file-date fdate]))
+        (handler-bind ((ZPB-EXIF:INVALID-JPEG-STREAM [return-from file-date fdate])
+                       (ZPB-EXIF:INVALID-EXIF-STREAM [return-from file-date fdate]))
           (awith (substitute #\- #\: (zpb-exif:exif-value :DateTimeOriginal (zpb-exif:make-exif file)) :count 2)
              (if (and it (string= it "0000" :end1 4))
                  fdate
@@ -99,17 +100,19 @@
     (error "Unknown tag")))
 
 (defun write-bit (value file position)
+  (declare (optimize debug))
   "Writes bit with value <value> at <position> in <file>. Since unwritten bits are read as zeros, if position is more than file length, we don't need to write the bit"
   (let* ((file-size (if (probe-file file) (filesize file) 0)))
     (when (and (= value 0)
-               (< file-size (ceiling position 8)))
+               (< file-size (ceiling (+ position 1) 8)))
       (return-from write-bit nil))
     (with-open-binfile (f file :direction :io
                                :if-exists :overwrite
                                :if-does-not-exist :create)
        (when (< file-size
-                (ceiling position 8))
-         (write-sequence (make-array (ceiling (- position file-size) 8)
+                (ceiling (+ position 1) 8))
+         (file-position f file-size)
+         (write-sequence (make-array (- (ceiling (+ position 1) 8) file-size)
                                      :element-type '(unsigned-byte 8)
                                      :initial-element 0)
                           f))
@@ -185,7 +188,7 @@
 
 (defmacro with-tag-and-subtags-seq ((seq col tag maxid offset limit) &body body)
   `(with-tagfile-seq (,seq ,col ,tag ,maxid ,offset ,limit)
-     (loop for subtag in (subtags tag) 
+     (loop for subtag in (subtags ,col ,tag) 
            do (with-tagfile-seq (subseq ,col ,tag ,maxid ,offset ,limit)
                  (bit-or subseq ,seq)))))
 
