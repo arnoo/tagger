@@ -88,7 +88,7 @@
   (str (col-root-dir col)
        "/.tagger/"
        (col-name col)))
- 
+
 (defun col-tag-file (col tag)
   (str (col-data-dir col) "/tags/" tag))
 
@@ -100,7 +100,6 @@
     (error "Unknown tag")))
 
 (defun write-bit (value file position)
-  (declare (optimize debug))
   "Writes bit with value <value> at <position> in <file>. Since unwritten bits are read as zeros, if position is more than file length, we don't need to write the bit"
   (let* ((file-size (if (probe-file file) (filesize file) 0)))
     (when (and (= value 0)
@@ -136,6 +135,20 @@
   (let* ((fid (file-id col file))
          (tag-file (col-tag-file col tag)))
     (write-bit 0 tag-file fid)))
+
+(defun read-bit (file position)
+  (with-open-binfile (f file)
+    (file-position f (floor position 8))
+    (if (logbitp (mod position 8) (read-byte f))
+        1
+        0)))
+
+(defun file-tags (col file)
+  "List the tags for <file> in <col>"
+  (let ((fid (file-id file)))
+    (loop for tag-file in (ls (str (col-root-dir col) "/tags/"))
+          when (= 1 (read-bit tag-file fid))
+          collect (tagfile-tag tag-file))))
 
 (defun file-id-file (col file)
     (str (col-data-dir col) "/fileids/" (~s "/\\//%%/g" file)))
@@ -180,8 +193,12 @@
                     (byte-to-bits (elt tempseq i))))))
 
 (defmacro with-tagfile-seq ((seq col tag maxid offset limit) &body body)
+  `(with-file-seq (,seq (col-tag-file ,col ,tag) maxid offset limit)
+      ,@body))
+
+(defmacro with-file-seq ((seq file maxid offset limit) &body body)
    `(let ((,seq (make-array ,maxid :element-type 'bit :initial-element 0)))
-      (with-open-binfile (f (col-tag-file ,col ,tag))
+      (with-open-binfile (f ,file)
         (awhen ,offset (file-position f (/ it 8)))
         (read-bitseq ,seq f :end ,limit)
         ,@body)))
@@ -189,19 +206,26 @@
 (defmacro with-tag-and-subtags-seq ((seq col tag maxid offset limit) &body body)
   `(with-tagfile-seq (,seq ,col ,tag ,maxid ,offset ,limit)
      (loop for subtag in (subtags ,col ,tag) 
-           do (with-tagfile-seq (subseq ,col ,tag ,maxid ,offset ,limit)
-                 (bit-or subseq ,seq)))))
+           do (with-tagfile-seq (subseq ,col subtag ,maxid ,offset ,limit)
+                 (bit-or subseq ,seq)))
+     ,@body))
+
+(defun tagfile-tag (tagfile)
+  (when (stringp tagfile)
+    (setf tagfile (namestring tagfile)))
+  (~s "/%%/\\//g" (str (pathname-name tagfile))))
 
 (defun subtags (col tag)
-  (mapcar [str (pathname-name _)] (directory (str (col-tag-file col tag) "%%*"))))
+  (mapcar #'tagfile-tag (directory (str (col-tag-file col tag) "%%*"))))
 
 (defun list-files (col &key +tags -tags (offset 0) limit)
   "List files in <col> matching <+tags> and not <-tags>"
   (let* ((maxid (max (col-max-id col) (if limit (+ offset limit) 0)))
-         (okids (make-array (if limit
-                                (min (- maxid offset) limit)
-                                (- maxid offset))
-                            :element-type 'bit)))
+         (okids (if +tags (make-array (if limit
+                                          (min (- maxid offset) limit)
+                                          (- maxid offset))
+                                     :element-type 'bit
+                                     :initial-element 1))))
     (loop for tag in +tags
           do (with-tag-and-subtags-seq (seq col tag maxid offset limit)
                (bit-and okids seq)))
@@ -209,7 +233,7 @@
           do (with-tagfile-seq (seq col tag maxid offset limit)
                (bit-and okids (bit-not seq))))
     (setf okids (delete 0 okids))
-    (mapcar [probe-file (gulp (str (col-data-dir col) "/filenames/" _))] okids)))
+    (remove nil (mapcar [probe-file (gulp (str (col-data-dir col) "/filenames/" _))] okids))))
 
 (defun init-col (col)
   (mkdir (str (col-data-dir col)))
