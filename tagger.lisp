@@ -143,7 +143,7 @@
         1
         0)))
 
-(defun file-tags (col file)
+(defun tags (col file)
   "List the tags for <file> in <col>"
   (let ((fid (file-id file)))
     (loop for tag-file in (ls (str (col-root-dir col) "/tags/"))
@@ -234,6 +234,10 @@
                (bit-and okids (bit-not seq))))
     (setf okids (delete 0 okids))
     (remove nil (mapcar [probe-file (gulp (str (col-data-dir col) "/filenames/" _))] okids))))
+
+(after make-col
+       (init-col
+
 
 (defun init-col (col)
   (mkdir (str (col-data-dir col)))
