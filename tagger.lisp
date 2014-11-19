@@ -183,37 +183,37 @@
          0)))
 
 (defun byte-to-bits (byte)
-  (awith (make-array 8 :element-type 'bit)
+  (awith (make-array 8 :element-type 'bit :initial-element 0)
     (loop for i from 0 to 7
-       do (setf (elt it i)
-                (if (logbitp i byte) 1 0)))
+          when (logbitp i byte)
+          do (setf (aref it i) 1))
     it))
 
 (defmacro read-bitseq (seq stream &key end)
-  `(let ((tempseq (make-array (ceiling (array-total-size seq) 8)
+  `(let* ((tempseq (make-array (ceiling (array-total-size ,seq) 8)
                               :element-type '(unsigned-byte 8)
-                              :initial-element 0)))
-     (read-sequence tempseq ,stream :end (ceiling 8 ,end))
-     (loop for i from 0 below ,end
-           do (setf (subseq ,seq (* i 8) (+ (* i 8) 1))
+                              :initial-element 0))
+          (bytes-read (read-sequence tempseq ,stream :end (if ,end (ceiling ,end 8) nil))))
+     (loop for i from 0 below bytes-read
+           do (setf (subseq ,seq (* i 8) (* (+ i 1) 8))
                     (byte-to-bits (elt tempseq i))))))
 
-(defmacro with-tagfile-seq ((seq col tag maxid offset limit) &body body)
-  `(with-file-seq (,seq (col-tag-file ,col ,tag) maxid offset limit)
+(defmacro with-tagfile-seq ((seq col tag offset limit) &body body)
+  `(with-file-seq (,seq (col-tag-file ,col ,tag) offset limit)
       ,@body))
 
-(defmacro with-file-seq ((seq file maxid offset limit) &body body)
-   `(let ((,seq (make-array (+ ,maxid 1) :element-type 'bit :initial-element 0)))
+(defmacro with-file-seq ((seq file offset limit) &body body)
+   `(let ((,seq (make-array ,limit :element-type 'bit :initial-element 0)))
       (with-open-binfile (f ,file)
-        (awhen ,offset (file-position f (floor it 8)))
+        (file-position f (floor offset 8))
         (read-bitseq ,seq f :end ,limit)
         ,@body)))
 
-(defmacro with-tag-and-subtags-seq ((seq col tag maxid offset limit) &body body)
-  `(with-tagfile-seq (,seq ,col ,tag ,maxid ,offset ,limit)
+(defmacro with-tag-and-subtags-seq ((seq col tag offset limit) &body body)
+  `(with-tagfile-seq (,seq ,col ,tag ,offset ,limit)
      (loop for subtag in (subtags ,col ,tag) 
-           do (with-tagfile-seq (subseq ,col subtag ,maxid ,offset ,limit)
-                 (bit-ior subseq ,seq)))
+           do (with-tagfile-seq (subseq ,col subtag ,offset ,limit)
+                 (setf ,seq (bit-ior subseq ,seq))))
      ,@body))
 
 (defun tagfile-tag (tagfile)
@@ -227,23 +227,26 @@
 (defmethod list-files ((col col) &key +tags -tags (offset 0) limit)
   "List files in <col> matching <+tags> and not <-tags>"
   (declare (optimize debug))
-  (let* ((maxid (max (col-max-id col) (if limit (+ offset limit) 0)))
-         (okids (make-array (if limit
-                                (min (- (+ maxid 1) offset) limit)
-                                (- (+ maxid 1) offset))
-                            :element-type 'bit
-                            :initial-element 1)))
+  (let ((maxid (col-max-id col)))
+    (when (or (not limit)
+              (< (- (+ maxid 1) offset) limit))
+        (setf limit (- (+ maxid 1) offset))))
+  (let ((okids (make-array limit
+                           :element-type 'bit
+                           :initial-element 1)))
     (loop for tag in +tags
-          do (with-tag-and-subtags-seq (seq col tag maxid offset limit)
-               (bit-and okids seq)))
+          do (with-tag-and-subtags-seq (seq col tag offset limit)
+               (describe seq)
+               (setf okids (bit-and okids seq))))
     (loop for tag in -tags
-          do (with-tagfile-seq (seq col tag maxid offset limit)
-               (bit-and okids (bit-not seq))))
-    (setf okids (delete 0 okids))
+          do (with-tagfile-seq (seq col tag offset limit)
+               (setf okids (bit-and okids (bit-not seq)))))
+    (describe okids)
     (loop for i from 0 below (length okids)
-          for fname = (probe-file (gulp (str (col-data-dir col) "/filenames/" i)))
+          for fname = (and (= 1 (aref okids i))
+                           (probe-file (gulp (str (col-data-dir col) "/filenames/" i))))
           when fname
-          collect fname)))
+          collect (probe-file (gulp (str (col-data-dir col) "/filenames/" i))))))
 
 (defun make-col (&rest args)
   (awith
