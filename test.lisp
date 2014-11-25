@@ -1,5 +1,6 @@
 (defpackage :tagger-test
-   (:use :cl :clutch :stefil))
+   (:use :cl :clutch :stefil)
+   (:export #'tag))
 
 (in-package :tagger-test)
 

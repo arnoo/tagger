@@ -1,5 +1,8 @@
 (defpackage :tagger
-    (:use     #:cl #:anaphora #:clutch))
+    (:use     #:cl #:anaphora #:clutch)
+    (:export  #:tag #:untag #:list-files #:id-file #:extension
+              #:make-col #:col-extensions #:col-name #:col-root-dir #:col-preset #:col-custom-extensions
+              #:update-master-index #:rebuild-index))
 
 (in-package :tagger)
 
@@ -24,8 +27,8 @@
   (case (if (slot-boundp col 'preset)
             (col-preset col)
             nil)
-    (:IMG (list ".jpg" ".jpeg" ".png" ".ico" ".bmp" ".xpm" ".gif"))
-    (:VID (list ".mpg" ".mkv" ".avi" ".mov" ".m4v" ".flv"))
+    (:IMG (list "jpg" "jpeg" "png" "ico" "bmp" "xpm" "gif"))
+    (:VID (list "mpg" "mkv" "avi" "mov" "m4v" "flv"))
     (:MEDIA (flatten (mapcar #'col-extensions (list :IMG :VID))))
     (otherwise (col-custom-extensions col))))
 
@@ -50,12 +53,12 @@
           do (file-id col file)
           while all-files)))
 
-(defmethod rebuild-indexes ((col col))
+(defmethod rebuild-index ((col col))
   )
 
 (defun file-date (file)
   (let ((fdate (file-write-date file)))
-    (if (in (list ".jpg" ".jpeg") (extension file))
+    (if (in (list "jpg" "jpeg") (extension file))
         (handler-bind ((ZPB-EXIF:INVALID-JPEG-STREAM [return-from file-date fdate])
                        (ZPB-EXIF:INVALID-EXIF-STREAM [return-from file-date fdate]))
           (awith (substitute #\- #\: (zpb-exif:exif-value :DateTimeOriginal (zpb-exif:make-exif file)) :count 2)
@@ -73,7 +76,7 @@
 
 (defun extension (file)
   (setf file (str file))
-  (lc {file (or (position #\. file :from-end t)
+  (lc {file (or (+ 1 (position #\. file :from-end t))
                 0)
             -1}))
 
@@ -224,7 +227,7 @@
 (defmethod subtags ((col col) tag)
   (mapcar #'tagfile-tag (directory (str (col-tag-file col tag) "%%*"))))
 
-(defmethod list-files ((col col) &key +tags -tags (offset 0) limit)
+(defmethod list-files ((col col) &key +tags -tags (offset 0) limit format)
   "List files in <col> matching <+tags> and not <-tags>"
   (declare (optimize debug))
   (let ((maxid (col-max-id col)))
@@ -241,12 +244,22 @@
     (loop for tag in -tags
           do (with-tagfile-seq (seq col tag offset limit)
                (setf okids (bit-and okids (bit-not seq)))))
-    (describe okids)
-    (loop for i from 0 below (length okids)
-          for fname = (and (= 1 (aref okids i))
-                           (probe-file (gulp (str (col-data-dir col) "/filenames/" i))))
-          when fname
-          collect (probe-file (gulp (str (col-data-dir col) "/filenames/" i))))))
+    (ecase format
+      ((nil :ids-only)
+	 (loop for i from 0 below (length okids)
+	       for fname = (and (= 1 (aref okids i))
+	       		   (id-file i))
+	       when fname
+	    collect (if (eq format :ids-only) i fname)))
+      (:bitseq
+         (loop for i from 0 below (length okids)
+	       when (and (= 1 (aref okids i))
+		         (not (id-file i)))
+	    do (setf (aref okids i) 0))
+	 okids))))
+
+(defmethod id-file ((col col) id)
+   (probe-file (gulp (str (col-data-dir col) "/filenames/" id))))
 
 (defun make-col (&rest args)
   (awith
