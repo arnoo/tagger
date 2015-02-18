@@ -1,13 +1,30 @@
 (defpackage :tagger-test
-   (:use :cl :clutch :stefil)
-   (:export #'tag))
+   (:use :cl :clutch :stefil))
 
 (in-package :tagger-test)
 
 (defvar *tfile* #p"/tmp/test-write-bit")
 
-(defsuite :tagger-bits)
-(in-suite :tagger-bits)
+(in-root-suite)
+
+(defmacro with-test-col ((col) &body body)
+  `(unwind-protect 
+       (progn
+          (mkdir "/tmp/tagger-test-col")
+          (loop for i from 1 to 100
+            do (ungulp (str "/tmp/tagger-test-col/file" (lpad i 3 :with "0") ".txt") "file contents"))
+          (let ((,col (tagger::make-col :root-dir "/tmp/tagger-test-col" :name (str (gensym)) :custom-extensions (list "txt"))))
+            ,@body))
+       (rm "/tmp/tagger-test-col" :recursive t)))
+
+(defsuite* tagger-files)
+
+(deftest list-all-files ()
+  (with-test-col (col)
+    (is (equal (length (tagger::list-all-files col))
+               100))))
+
+(defsuite* tagger-bits)
 
 (deftest write-zero-to-empty-file ()
   (rm *tfile*)
@@ -97,18 +114,7 @@
   
   
 
-(defsuite :tagger-tags)
-(in-suite :tagger-tags)
-
-(defmacro with-test-col ((col) &body body)
-  `(unwind-protect 
-       (progn
-          (mkdir "/tmp/tagger-test-col")
-          (loop for i from 1 to 100
-            do (ungulp (str "/tmp/tagger-test-col/file" (lpad i 3 :with "0") ".txt") "file contents"))
-          (let ((,col (tagger::make-col :root-dir "/tmp/tagger-test-col" :name (str (gensym)) :custom-extensions (list ".txt"))))
-            ,@body))
-       (rm "/tmp/tagger-test-col" :recursive t)))
+(defsuite* tagger-tags)
 
 
 (deftest basic-tag-untag ()
@@ -116,8 +122,6 @@
     (tagger::update-master-index col)
     (awith "/tmp/tagger-test-col/file010.txt"
         (tagger::tag col it "tag1")
-        (print (sh (str "xxd " (tagger::col-tag-file col "tag1"))))
-        (print (tagger::file-id col "/tmp/tagger-test-col/file010.txt"))
         (is (= (tagger::read-bit (tagger::col-tag-file col "tag1") 9) 1))
         (is (equal (tagger::tags col it) (list "tag1")))
         (tagger::untag col it "tag1")
@@ -174,3 +178,6 @@
                   '()))
        )))
            
+(tagger-files)
+(tagger-bits)
+(tagger-tags)

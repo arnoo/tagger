@@ -1,7 +1,9 @@
 (defpackage :tagger
-    (:use     #:cl #:anaphora #:clutch)
+    (:use     #:cl #:clutch)
+    (:shadowing-import-from #:clutch)
     (:export  #:tag #:untag #:list-files #:id-file #:extension
               #:make-col #:col-extensions #:col-name #:col-root-dir #:col-preset #:col-custom-extensions
+              #:list-tags
               #:update-master-index #:rebuild-index))
 
 (in-package :tagger)
@@ -9,11 +11,18 @@
 (defclass col ()
   ((name               :accessor col-name               :initarg :name)
    (root-dir           :accessor col-root-dir           :initarg :root-dir)
-   (preset             :accessor col-preset             :initarg :preset)
-   (custom-extensions  :accessor col-custom-extensions  :initarg :custom-extensions)))
+   (preset             :accessor col-preset             :initarg :preset :initform nil)
+   (custom-extensions  :accessor col-custom-extensions  :initarg :custom-extensions :initform nil)))
 
 (defun bytes-to-integer (bytes)
   (reduce #'(lambda (a b) (+ (ash a 8) b)) bytes))
+
+(defun bits-to-byte (bitseq)
+  (reduce #'(lambda (a b) (+ (ash a 1) b))
+          (if (= (length bitseq) 8)
+              bitseq
+              (concatenate 'list bitseq (x #*1
+                                           (- 8 (length bitseq)))))))
 
 (defun integer-to-bytes (integer)
   (if (zerop integer)
@@ -22,15 +31,17 @@
         (loop for index from 0 by 8
               while (> (ash integer (- index)) 0)
               collect (ldb (byte 8 index) integer)))))
+
+(defun bitseq-to-byteseq (bitseq)
+  (loop for i from 0 to (floor (length bitseq) 8)
+        collect (bits-to-byte {bitseq (* i 8) (min (* (+ i 1) 8) (length bitseq))})))
  
 (defmethod col-extensions ((col col))
-  (case (if (slot-boundp col 'preset)
-            (col-preset col)
-            nil)
-    (:IMG (list "jpg" "jpeg" "png" "ico" "bmp" "xpm" "gif"))
-    (:VID (list "mpg" "mkv" "avi" "mov" "m4v" "flv"))
-    (:MEDIA (flatten (mapcar #'col-extensions (list :IMG :VID))))
-    (otherwise (col-custom-extensions col))))
+  (append (case (col-preset col)
+            (:IMG (list "jpg" "jpeg" "png" "ico" "bmp" "xpm" "gif"))
+            (:VID (list "mpg" "mkv" "avi" "mov" "m4v" "flv"))
+            (:MEDIA (flatten (mapcar #'col-extensions (list :IMG :VID)))))
+          (col-custom-extensions col)))
 
 (defun dir-list (dir)
   (handler-bind ((SB-INT:C-STRING-DECODING-ERROR [return-from dir-list nil]))
@@ -50,8 +61,8 @@
 (defmethod update-master-index ((col col))
   (let ((all-files (list-all-files col)))
     (loop for file = (pop all-files)
-          do (file-id col file)
-          while all-files)))
+          while file
+          do (file-id col file))))
 
 (defmethod rebuild-index ((col col))
   )
@@ -239,29 +250,30 @@
                            :initial-element 1)))
     (loop for tag in +tags
           do (with-tag-and-subtags-seq (seq col tag offset limit)
-               (describe seq)
                (setf okids (bit-and okids seq))))
     (loop for tag in -tags
           do (with-tagfile-seq (seq col tag offset limit)
                (setf okids (bit-and okids (bit-not seq)))))
     (ecase format
       ((nil :ids-only)
-	 (loop for i from 0 below (length okids)
-	       for fname = (and (= 1 (aref okids i))
-	       		   (id-file i))
-	       when fname
-	    collect (if (eq format :ids-only) i fname)))
+        (loop for i from 0 below (length okids)
+              for fname = (and (= 1 (aref okids i))
+                    (id-file col i))
+              when fname
+              collect (if (eq format :ids-only) i fname)))
       (:bitseq
          (loop for i from 0 below (length okids)
-	       when (and (= 1 (aref okids i))
-		         (not (id-file i)))
-	    do (setf (aref okids i) 0))
-	 okids))))
+               when (and (= 1 (aref okids i))
+                         (not (id-file col i)))
+               do (setf (aref okids i) 0))
+         okids))))
 
 (defmethod id-file ((col col) id)
    (probe-file (gulp (str (col-data-dir col) "/filenames/" id))))
 
 (defun make-col (&rest args)
+  (awhen (getf args :custom-extensions)
+    (assert (not (~ "/^\\./" it))))
   (awith
     (apply #'make-instance (cons 'col args))
     (init-col it)
@@ -269,8 +281,52 @@
                    
 (defmethod init-col ((col col))
   (mkdir (str (col-root-dir col) "/.tagger"))
-  (mkdir (str (col-data-dir col)))
+  (mkdir (col-data-dir col))
   (mkdir (str (col-data-dir col) "/tags"))
   (mkdir (str (col-data-dir col) "/filenames"))
-  (mkdir (str (col-data-dir col) "/fileids")))
+  (mkdir (str (col-data-dir col) "/fileids"))
+  (ungulp (str (col-data-dir col)
+               "/config")
+          (with-output-to-string (s)
+             (write (list :preset (col-preset col) :custom-extensions (col-custom-extensions col)) :stream s))))
 
+(defun load-col (root-dir name)
+  (let ((col (make-instance 'col
+                :root-dir root-dir
+                :name name)))
+     (destructuring-bind (&key preset custom-extensions)
+                         (read-from-string (gulp (str (col-data-dir col) "/config")))
+       (setf (col-preset col) preset)
+       (setf (col-custom-extensions col) custom-extensions))
+     col))
+
+(defun list-cols (&key dir)
+  (unless dir
+    (setf dir (env "PWD"))))
+
+(defun find-col (&key dir)
+  (unless dir
+    (setf dir (env "PWD")))
+  (let ((tdir (str dir "/.tagger")))
+     (if (probe-dir tdir)
+         (let ((cols (ls tdir)))
+           (cond ((> (length cols) 1)
+                    (error (str "Multiple collections found, please specify one of : " (join ", " (list-cols :dir dir)))))
+                 ((= (length cols) 0)
+                    (find-col :dir dir))
+                 (t (load-col dir col))))
+         (find-col :dir dir))))
+
+(defun parent-dir (dir)
+  (if (string= (str dir) "/")
+      nil
+      (awith (remove "" (split "/" (str dir)))
+        (str "/" (join "/" {it 0 -2})))))
+        
+(defun list-tags (&key start col)
+  (unless col
+    (setf col (find-col)))
+  (awith (ls (str (col-data-dir col) "/tags/"))
+    (if start
+        (remove-if-not [in _ start :at 0] it)
+        it)))
